@@ -1,4 +1,41 @@
-- name: Install Build Dependencies
+name: Build Vayu Kernel (Performance)
+
+on:
+  workflow_dispatch:
+    inputs:
+      config:
+        description: 'Kernel config'
+        required: true
+        default: 'vayu_user_defconfig'
+        type: choice
+        options:
+          - vayu_user_defconfig
+          - vayu_defconfig
+
+jobs:
+  build:
+    name: Build Kernel
+    runs-on: ubuntu-latest
+
+    container:
+      image: ubuntu:20.04
+
+    steps:
+    - name: Prepare Environment
+      run: |
+        export DEBIAN_FRONTEND=noninteractive
+        ln -fs /usr/share/zoneinfo/UTC /etc/localtime
+        apt-get update
+        apt-get install -y git tzdata
+        dpkg-reconfigure --frontend noninteractive tzdata
+
+    - name: Checkout Kernel Source
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        fetch-depth: 1
+
+    - name: Install Build Dependencies
       run: |
         export DEBIAN_FRONTEND=noninteractive
         apt-get update && apt-get install -y \
@@ -8,7 +45,26 @@
           xsltproc zip zlib1g-dev python2 python3 libtinfo5 python-is-python3 \
           ccache bison flex libelf-dev
 
-    # ... (Keep your Setup KernelSU, Proton Clang, AnyKernel, and Enable ccache steps the same) ...
+    - name: Setup KernelSU-Next (Latest)
+      run: |
+        rm -rf KernelSU-Next kernelsu drivers/kernelsu
+        curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -s next
+        echo "CONFIG_KSU=y" >> arch/arm64/configs/${{ inputs.config }}
+        echo "CONFIG_OVERLAY_FS=y" >> arch/arm64/configs/${{ inputs.config }}
+
+    - name: Get Proton Clang
+      run: |
+        git clone --depth=1 https://github.com/kdrag0n/proton-clang clang
+
+    - name: Get AnyKernel3
+      run: |
+        git clone https://github.com/osm0sis/AnyKernel3
+        rm -rf AnyKernel3/.git
+
+    - name: Enable ccache
+      run: |
+        ccache --max-size=5G
+        ccache -z
 
     - name: Build Kernel
       run: |
@@ -18,27 +74,32 @@
         export CROSS_COMPILE=aarch64-linux-gnu-
         export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
-        # Optimization flags
+        # clang + ccache enabled
+        export CC="ccache clang"
+        export CXX="ccache clang++"
+        export AR=llvm-ar
+        export NM=llvm-nm
+        export OBJCOPY=llvm-objcopy
+        export OBJDUMP=llvm-objdump
+        export STRIP=llvm-strip
+
+        # kernel optimization flags
         export KCFLAGS="-O3 -fmerge-all-constants -fstrict-aliasing \
         -ffast-math -fno-semantic-interposition -funsafe-math-optimizations"
 
         export LLVM=1
         export LLVM_IAS=1
 
-        # Clean source (removed O=out)
+        # CLEAN AND BUILD (Removed O=out to fix path issues)
         make clean
         make mrproper
-
-        # Make config (removed O=out)
         make ${{ inputs.config }}
 
-        # Modify config (removed out/ prefix)
+        # Edit .config (In-tree, so no out/ prefix)
         ./scripts/config --file .config --enable LTO_CLANG
         ./scripts/config --file .config --enable THINLTO
         ./scripts/config --file .config --disable DEBUG_INFO
 
-        # Build (removed O=out)
-        # We quote ccache clang safely here
         make -j$(nproc --all) \
           CC="ccache clang" \
           CXX="ccache clang++" \
@@ -55,7 +116,7 @@
     - name: Package Kernel
       if: success()
       run: |
-        # Updated paths (removed out/ prefix)
+        # Check for images in source tree (no out/ prefix)
         if [ -f arch/arm64/boot/Image ]; then
            cp arch/arm64/boot/Image AnyKernel3/
         elif [ -f arch/arm64/boot/Image.gz ]; then
@@ -66,3 +127,15 @@
 
         cd AnyKernel3
         zip -r9 ../Vayu-Kernel-Signed.zip * -x .git README.md
+
+    - name: Upload Kernel Zip
+      if: success()
+      uses: actions/upload-artifact@v4
+      with:
+        name: Vayu-Kernel-Signed
+        path: Vayu-Kernel-Signed.zip
+
+    - name: ccache stats
+      if: always()
+      run: |
+        ccache -s
