@@ -1,39 +1,24 @@
-    - name: Install Build Dependencies
-      run: |
-        apt-get update && apt-get install -y \
-          build-essential bc curl git gnupg gperf imagemagick lib32readline-dev \
-          lib32z1-dev liblz4-tool libncurses5-dev libsdl1.2-dev libssl-dev \
-          libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools \
-          xsltproc zip zlib1g-dev python2 python3 libtinfo5 python-is-python3 \
-          ccache
+name: Build Vayu Kernel (Performance)
+on:
+  workflow_dispatch:
+    inputs:
+      config:
+        description: 'Kernel config'
+        required: true
+        default: 'vayu_user_defconfig'
+        type: choice
+        options:
+          - vayu_user_defconfig
+          - vayu_defconfig
 
-    - name: Enable ccache
-      run: |
-        ccache --max-size=5G
-        ccache -z
+jobs:
+  build:
+    name: Build Kernel
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:20.04
 
-    - name: Build Kernel
-      run: |
-        export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
-        export ARCH=arm64
-        export SUBARCH=arm64
-        export CROSS_COMPILE=aarch64-linux-gnu-
-        export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-
-        export CC="ccache clang"
-        export CXX="ccache clang++"
-        export AR=llvm-ar
-        export NM=llvm-nm
-        export OBJCOPY=llvm-objcopy
-        export OBJDUMP=llvm-objdump
-        export STRIP=llvm-strip
-
-        # Kernel-safe optimization flags
-        export KCFLAGS="-O3 -fmerge-all-constants -fstrict-aliasing \
-        -ffast-math -fno-semantic-interposition -funsafe-math-optimizations"
-
-        export LLVM=1
-        export LLVM_IAS=1
+    steps:
 
         make O=out clean
         make O=out mrproper
