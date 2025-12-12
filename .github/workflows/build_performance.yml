@@ -100,6 +100,9 @@ jobs:
         ./scripts/config --file .config --enable THINLTO
         ./scripts/config --file .config --disable DEBUG_INFO
 
+        # Fix: Automatically accept defaults for new options (like CFI)
+        make LLVM=1 LLVM_IAS=1 olddefconfig
+
         make -j$(nproc --all) \
           CC="ccache clang" \
           CXX="ccache clang++" \
