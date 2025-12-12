@@ -1,4 +1,4 @@
-name: Build Vayu Kernel (Max Performance - Clang + PGO)
+name: Build Vayu Kernel (Max Performance)
 on:
   workflow_dispatch:
     inputs:
@@ -13,9 +13,12 @@ on:
 
 jobs:
   build:
-    name: Build Kernel (Performance Optimized)
+    name: Build Kernel
     runs-on: ubuntu-latest
-    
+    # VITAL FIX: Use Ubuntu 20.04 container to fix dependency errors
+    container:
+      image: ubuntu:20.04
+
     steps:
     - name: Checkout Kernel Source
       uses: actions/checkout@v4
@@ -25,30 +28,35 @@ jobs:
 
     - name: Install Build Dependencies
       run: |
-        sudo dpkg --add-architecture i386
-        sudo apt-get update
-        sudo apt-get install -y \
-          bc bison build-essential ccache curl flex g++-multilib \
-          gcc-multilib git gnupg gperf imagemagick libncurses-dev:i386 \
-          lib32readline-dev lib32z1-dev liblz4-tool libncurses-dev \
-          libsdl1.2-dev libssl-dev libxml2 libxml2-utils \
-          lzop pngcrush rsync schedtool squashfs-tools xsltproc zip \
-          zlib1g-dev python3 python-is-python3 libgmp-dev libmpc-dev
+        apt-get update && apt-get install -y \
+          build-essential bc curl git gnupg gperf imagemagick lib32readline-dev \
+          lib32z1-dev liblz4-tool libncurses5-dev libsdl1.2-dev libssl-dev \
+          libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools \
+          xsltproc zip zlib1g-dev python2 python3 libtinfo5 \
+          python-is-python3
 
-    - name: Download Latest Proton Clang
+    - name: Setup KernelSU-Next (Latest)
       run: |
-        echo "Downloading latest Proton Clang..."
-        git clone --depth=1 https://github.com/kdrag0n/proton-clang clang
-        echo "Proton Clang version:"
-        ./clang/bin/clang --version
+        # Clean previous attempts
+        rm -rf KernelSU-Next kernelsu drivers/kernelsu
+        
+        # Download latest KSU Next
+        curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -s next
+        
+        # Ensure it is enabled in your config
+        echo "CONFIG_KSU=y" >> arch/arm64/configs/${{ inputs.config }}
+        echo "CONFIG_OVERLAY_FS=y" >> arch/arm64/configs/${{ inputs.config }}
 
-    - name: Download AnyKernel3 Template
+    - name: Get Proton Clang
+      run: |
+        git clone --depth=1 https://github.com/kdrag0n/proton-clang clang
+
+    - name: Get AnyKernel3
       run: |
         git clone https://github.com/osm0sis/AnyKernel3
         rm -rf AnyKernel3/.git
-        echo "AnyKernel3 template ready"
 
-    - name: Configure Build Environment
+    - name: Build Kernel
       run: |
         export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
         export ARCH=arm64
@@ -62,178 +70,53 @@ jobs:
         export OBJCOPY=llvm-objcopy
         export OBJDUMP=llvm-objdump
         export STRIP=llvm-strip
-        export LDFLAGS="-fuse-ld=lld"
-        
-        echo "PATH=$PATH" >> $GITHUB_ENV
-        echo "ARCH=$ARCH" >> $GITHUB_ENV
-        echo "SUBARCH=$SUBARCH" >> $GITHUB_ENV
-        echo "CROSS_COMPILE=$CROSS_COMPILE" >> $GITHUB_ENV
-        echo "CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32" >> $GITHUB_ENV
-        echo "CC=$CC" >> $GITHUB_ENV
-        echo "CXX=$CXX" >> $GITHUB_ENV
-        echo "AR=$AR" >> $GITHUB_ENV
-        echo "NM=$NM" >> $GITHUB_ENV
-        echo "OBJCOPY=$OBJCOPY" >> $GITHUB_ENV
-        echo "OBJDUMP=$OBJDUMP" >> $GITHUB_ENV
-        echo "STRIP=$STRIP" >> $GITHUB_ENV
-        echo "LDFLAGS=$LDFLAGS" >> $GITHUB_ENV
 
-    - name: Clean Build Artifacts
-      run: |
+        # Clean
         make O=out clean
         make O=out mrproper
 
-    - name: Load Configuration
-      run: |
+        # Configure
         make O=out ${{ inputs.config }}
 
-    - name: Apply Performance Optimizations
-      run: |
-        echo "=== Applying Maximum Performance Optimizations ==="
-        
-        # Enable Thin LTO for best balance between performance and compilation time
-        sed -i 's/# CONFIG_LTO_CLANG is not set/CONFIG_LTO_CLANG=y/g' out/.config
-        sed -i 's/# CONFIG_THINLTO is not set/CONFIG_THINLTO=y/g' out/.config
-        
-        # Enable LLVM optimizations
-        echo "CONFIG_LTO_CLANG=y" >> out/.config
-        echo "CONFIG_THINLTO=y" >> out/.config
-        
-        # Maximum optimization flags
-        echo "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y" >> out/.config
-        echo "# CONFIG_DEBUG_INFO is not set" >> out/.config
-        
-        # Enable PGO (Profile-Guided Optimization) if supported
-        echo "CONFIG_PGO_CLANG=y" >> out/.config 2>/dev/null || true
-        
-        # Disable debugging symbols for smaller, faster kernel
-        sed -i 's/CONFIG_DEBUG_INFO=y/# CONFIG_DEBUG_INFO is not set/g' out/.config
-        sed -i 's/CONFIG_DEBUG_INFO_SPLIT=y/# CONFIG_DEBUG_INFO_SPLIT is not set/g' out/.config
-        sed -i 's/CONFIG_FRAME_POINTER=y/# CONFIG_FRAME_POINTER is not set/g' out/.config
-        
-        # Enable CFI (Control Flow Integrity) for security without performance loss
-        echo "CONFIG_CFI_CLANG=y" >> out/.config 2>/dev/null || true
-        
-        echo "=== Configuration Applied ==="
-        grep "CONFIG_LTO\|CONFIG_CC_OPTIMIZE\|CONFIG_CFI" out/.config || true
+        # Apply Optimization Flags (ThinLTO)
+        ./scripts/config --file out/.config --enable LTO_CLANG
+        ./scripts/config --file out/.config --enable THINLTO
+        ./scripts/config --file out/.config --disable DEBUG_INFO
 
-    - name: Generate Config
-      run: |
-        make O=out olddefconfig
+        # Build
+        make -j$(nproc --all) O=out \
+          CC=clang \
+          AR=llvm-ar \
+          NM=llvm-nm \
+          OBJCOPY=llvm-objcopy \
+          OBJDUMP=llvm-objdump \
+          STRIP=llvm-strip \
+          CROSS_COMPILE=aarch64-linux-gnu- \
+          CROSS_COMPILE_ARM32=arm-linux-gnueabi- 2>&1 | tee build.log
 
-    - name: Build Kernel with Maximum Parallelism
+    - name: Package Kernel
+      if: success()
       run: |
-        echo "=== Starting Kernel Build ==="
-        echo "Using $(nproc --all) CPU cores"
-        make O=out -j$(nproc --all) 2>&1 | tee build.log
-        
-        if [ $? -ne 0 ]; then
-          echo "Build failed! Last 100 lines of build log:"
-          tail -100 build.log
-          exit 1
-        fi
-
-    - name: Verify Kernel Image
-      run: |
-        echo "=== Verifying Build Output ==="
-        
         if [ -f out/arch/arm64/boot/Image ]; then
-           echo "✓ Found Image"
-           ls -lh out/arch/arm64/boot/Image
-           KERNEL_FILE="Image"
+           cp out/arch/arm64/boot/Image AnyKernel3/
         elif [ -f out/arch/arm64/boot/Image.gz ]; then
-           echo "✓ Found Image.gz"
-           ls -lh out/arch/arm64/boot/Image.gz
-           KERNEL_FILE="Image.gz"
-        elif [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
-           echo "✓ Found Image.gz-dtb"
-           ls -lh out/arch/arm64/boot/Image.gz-dtb
-           KERNEL_FILE="Image.gz-dtb"
-        else
-           echo "✗ ERROR: Kernel image not found!"
-           ls -la out/arch/arm64/boot/
-           exit 1
+           cp out/arch/arm64/boot/Image.gz AnyKernel3/
         fi
-        
-        echo "KERNEL_FILE=$KERNEL_FILE" >> $GITHUB_ENV
-
-    - name: Copy Kernel to AnyKernel3
-      run: |
-        echo "=== Packaging Kernel ==="
-        
-        if [ -f "out/arch/arm64/boot/$KERNEL_FILE" ]; then
-           cp out/arch/arm64/boot/$KERNEL_FILE AnyKernel3/
-           echo "✓ Copied kernel image"
-        fi
-        
-        if [ -f out/arch/arm64/boot/dtb ]; then
-           cp out/arch/arm64/boot/dtb AnyKernel3/
-           echo "✓ Copied dtb"
-        fi
-        
-        if [ -f out/arch/arm64/boot/dtbo.img ]; then
-           cp out/arch/arm64/boot/dtbo.img AnyKernel3/
-           echo "✓ Copied dtbo"
-        fi
-        
-        ls -la AnyKernel3/
-
-    - name: Create Flashable Recovery Zip
-      run: |
-        echo "=== Creating Flashable Zip ==="
+        [ -f out/arch/arm64/boot/dtbo.img ] && cp out/arch/arm64/boot/dtbo.img AnyKernel3/
         
         cd AnyKernel3
-        
-        # Update meta-inf if needed for recovery
-        chmod +x META-INF/com/google/android/update-binary 2>/dev/null || true
-        chmod +x META-INF/com/google/android/updater-script 2>/dev/null || true
-        
-        # Create zip with optimal compression
-        zip -r9qv ../Vayu-Kernel-Performance.zip . \
-          -x "*.git*" "*.DS_Store" "*.zip"
-        
-        cd ..
-        
-        echo "✓ Flashable zip created"
-        ls -lh Vayu-Kernel-Performance.zip
+        zip -r9 ../Vayu-Kernel-Signed.zip * -x .git README.md
 
-    - name: Generate Build Info
-      run: |
-        cat > build_info.txt << 'EOF'
-        ===== VAYU KERNEL BUILD INFO =====
-        
-        Build Date: $(date)
-        Config Used: ${{ inputs.config }}
-        Compiler: Proton Clang (Latest)
-        Optimizations Applied:
-          - Thin LTO (Link Time Optimization)
-          - LLVM Optimizations
-          - Control Flow Integrity (CFI)
-          - Debug Symbols Removed
-          - Maximum Performance Flags
-        
-        Output: Vayu-Kernel-Performance.zip
-        Flashable: Yes (via TWRP/Recovery)
-        EOF
-        cat build_info.txt
-
-    - name: Upload Flashable Kernel Zip
+    - name: Upload Kernel Zip
+      if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: Vayu-Kernel-Performance-Flashable
-        path: Vayu-Kernel-Performance.zip
-        retention-days: 30
+        name: Vayu-Kernel-Signed
+        path: Vayu-Kernel-Signed.zip
 
     - name: Upload Build Log
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: Build-Log
+        name: build.log
         path: build.log
-        retention-days: 7
-
-    - name: Upload Build Info
-      uses: actions/upload-artifact@v4
-      with:
-        name: Build-Info
-        path: build_info.txt
